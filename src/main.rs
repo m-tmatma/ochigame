@@ -233,21 +233,19 @@ impl Board {
         }
     }
 
-    // 各列ごとにブロックを独立して落下させる。
-    // 消去によって生じた空白ギャップを埋め、浮いたブロックを着地させる。
+    // 行単位でブロックを落下させる。消去された行の上の行がまとめて下へずれる。
     fn apply_gravity(&mut self) {
-        for c in 0..COLS {
-            let filled: Vec<Color> = (0..ROWS)
-                .filter_map(|r| self.cells[r][c])
-                .collect();
-            let empty_rows = ROWS - filled.len();
-            for r in 0..ROWS {
-                self.cells[r][c] = if r < empty_rows {
-                    None
-                } else {
-                    Some(filled[r - empty_rows])
-                };
-            }
+        let filled: Vec<[Option<Color>; COLS]> = (0..ROWS)
+            .filter(|&r| self.cells[r].iter().any(|c| c.is_some()))
+            .map(|r| self.cells[r])
+            .collect();
+        let empty_rows = ROWS - filled.len();
+        for r in 0..ROWS {
+            self.cells[r] = if r < empty_rows {
+                [None; COLS]
+            } else {
+                filled[r - empty_rows]
+            };
         }
     }
 
@@ -505,29 +503,24 @@ impl Game {
     // 爆発アニメーション終了: 行を消去し、落下アニメーションを開始する。
     fn finish_clear(&mut self) {
         let count = self.clearing_rows.len() as u32;
-        self.board.clear_rows(&self.clearing_rows);
-        self.clearing_rows.clear();
+        let cleared = std::mem::take(&mut self.clearing_rows);
+        self.board.clear_rows(&cleared);
 
-        // 重力適用前後の差分から FallingBlock を生成する
         let before = self.board.cells; // コピー
         self.board.apply_gravity();
 
+        // 各行が消去行の数だけ下へずれる (行単位重力)
         self.falling_blocks.clear();
-        for c in 0..COLS {
-            // 消去前のこの列のブロック (上から順)
-            let cells_before: Vec<(usize, Color)> = (0..ROWS)
-                .filter_map(|r| before[r][c].map(|color| (r, color)))
-                .collect();
-            let n = cells_before.len();
-            let target_start = ROWS - n; // 重力後の先頭行
-            for (i, (from_row, color)) in cells_before.iter().enumerate() {
-                let to_row = target_start + i;
-                if *from_row != to_row {
+        for r in 0..ROWS {
+            let drop = cleared.iter().filter(|&&cr| cr > r).count();
+            if drop == 0 { continue; }
+            for c in 0..COLS {
+                if let Some(color) = before[r][c] {
                     self.falling_blocks.push(FallingBlock {
                         col: c,
-                        color: *color,
-                        visual_y: *from_row as f32,
-                        target_row: to_row,
+                        color,
+                        visual_y: r as f32,
+                        target_row: r + drop,
                     });
                 }
             }
@@ -537,16 +530,15 @@ impl Game {
         self.score += score_for(count) * self.level;
         self.level = self.lines / 10 + 1;
 
-        // 落下するブロックがなければ即座に連鎖チェックへ
         if self.falling_blocks.is_empty() {
-            self.begin_clear();
+            self.spawn_next();
         }
     }
 
-    // 落下アニメーション終了: 連鎖チェックまたは次ピースへ。
+    // 落下アニメーション終了: 次ピースへ。
     fn finish_fall(&mut self) {
         self.falling_blocks.clear();
-        self.begin_clear();
+        self.spawn_next();
     }
 
     // 次のピースをスポーンする。衝突していればゲームオーバー。
