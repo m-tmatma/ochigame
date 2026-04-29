@@ -157,25 +157,16 @@ impl Board {
         }
     }
 
-    // 揃ったラインを消去して上のブロックを落とし、消去数を返す。
-    // 下から書き込み位置を管理することで、消去と詰めを1パスで行う。
+    // 揃ったラインのセルをすべて None にして消去数を返す。
+    // ブロックの落下は apply_gravity が担う。
     fn clear_lines(&mut self) -> u32 {
         let mut cleared = 0u32;
-        let mut new_cells = [[None; COLS]; ROWS];
-        let mut write_row = ROWS - 1; // 下から詰めていく
-
-        for r in (0..ROWS).rev() {
+        for r in 0..ROWS {
             if self.cells[r].iter().all(|c| c.is_some()) {
-                // 全マス埋まっている → このラインを消去 (コピーしない)
+                self.cells[r] = [None; COLS];
                 cleared += 1;
-            } else {
-                new_cells[write_row] = self.cells[r];
-                if write_row > 0 {
-                    write_row -= 1;
-                }
             }
         }
-        self.cells = new_cells;
         cleared
     }
 
