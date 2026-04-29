@@ -8,6 +8,8 @@ const CELL: f32 = 32.0;
 // ボード左上の描画位置
 const BOARD_X: f32 = 200.0;
 const BOARD_Y: f32 = 40.0;
+// ライン消去フラッシュアニメーションの時間 (秒)
+const CLEAR_ANIM_DURATION: f32 = 0.45;
 
 // テトロミノ7種の形状。各ピースは4x4のビットマップで表現し、
 // 1 がブロックのあるマス、0 が空マス。
@@ -157,17 +159,18 @@ impl Board {
         }
     }
 
-    // 揃ったラインのセルをすべて None にして消去数を返す。
-    // ブロックの落下は apply_gravity が担う。
-    fn clear_lines(&mut self) -> u32 {
-        let mut cleared = 0u32;
-        for r in 0..ROWS {
-            if self.cells[r].iter().all(|c| c.is_some()) {
-                self.cells[r] = [None; COLS];
-                cleared += 1;
-            }
+    // 揃っている行のインデックスを返す (消去はしない)。
+    fn full_rows(&self) -> Vec<usize> {
+        (0..ROWS)
+            .filter(|&r| self.cells[r].iter().all(|c| c.is_some()))
+            .collect()
+    }
+
+    // 指定した行のセルをすべて None にする。
+    fn clear_rows(&mut self, rows: &[usize]) {
+        for &r in rows {
+            self.cells[r] = [None; COLS];
         }
-        cleared
     }
 
     // ライン消去後、各列ごとにブロックを独立して落下させる。
@@ -189,7 +192,8 @@ impl Board {
         }
     }
 
-    fn draw(&self) {
+    // ボードを描画する。clearing_rows に含まれる行はフラッシュアニメーションで表示する。
+    fn draw(&self, clearing_rows: &[usize], clear_timer: f32) {
         // ボードの外枠
         draw_rectangle_lines(
             BOARD_X - 2.0,
@@ -204,7 +208,20 @@ impl Board {
             for c in 0..COLS {
                 let x = BOARD_X + c as f32 * CELL;
                 let y = BOARD_Y + r as f32 * CELL;
-                if let Some(color) = self.cells[r][c] {
+
+                if clearing_rows.contains(&r) {
+                    // sin波で3回白くフラッシュ: t=0→1 の間に3往復
+                    let t = clear_timer / CLEAR_ANIM_DURATION;
+                    let wave = ((t * std::f32::consts::PI * 6.0).sin() * 0.5 + 0.5) as f32;
+                    let col = self.cells[r][c].unwrap_or(WHITE);
+                    let flash_color = Color::new(
+                        col.r + (1.0 - col.r) * wave,
+                        col.g + (1.0 - col.g) * wave,
+                        col.b + (1.0 - col.b) * wave,
+                        1.0,
+                    );
+                    draw_rectangle(x, y, CELL - 1.0, CELL - 1.0, flash_color);
+                } else if let Some(color) = self.cells[r][c] {
                     // 固定済みブロック
                     draw_rectangle(x, y, CELL - 1.0, CELL - 1.0, color);
                 } else {
@@ -290,18 +307,21 @@ fn next_kind() -> usize {
 // ゲーム全体の状態を保持する。
 struct Game {
     board: Board,
-    current: Piece,  // 現在操作中のピース
+    current: Piece,   // 現在操作中のピース
     next_kind: usize, // 次に出るピースの種類
     score: u32,
     lines: u32,
     level: u32,
-    fall_timer: f32,  // 次の自動落下までの経過時間 (秒)
-    lock_timer: f32,  // 着地後の固定までの待機時間 (秒)
+    fall_timer: f32, // 次の自動落下までの経過時間 (秒)
+    lock_timer: f32, // 着地後の固定までの待機時間 (秒)
     game_over: bool,
     // DAS (Delayed Auto Shift): キー長押しによる連続横移動の制御
-    das_timer: f32,  // 現在の方向キー押下継続時間
+    das_timer: f32,   // 現在の方向キー押下継続時間
     das_active: bool, // 初回ディレイを超えてARR段階に入っているか
-    last_dir: i32,   // 前フレームの方向 (-1/0/1)
+    last_dir: i32,    // 前フレームの方向 (-1/0/1)
+    // ライン消去アニメーション
+    clearing_rows: Vec<usize>, // アニメーション中の行インデックス (空なら通常状態)
+    clear_anim_timer: f32,     // アニメーション経過時間 (秒)
 }
 
 impl Game {
@@ -321,6 +341,8 @@ impl Game {
             das_timer: 0.0,
             das_active: false,
             last_dir: 0,
+            clearing_rows: Vec::new(),
+            clear_anim_timer: 0.0,
         }
     }
 
@@ -371,25 +393,40 @@ impl Game {
         self.lock_piece();
     }
 
-    // ピースをボードに固定し、ライン消去・スコア加算・次ピース生成を行う。
-    // 新ピースがスポーン直後から衝突していればゲームオーバーとする。
+    // ピースをボードに固定し、ライン消去アニメーションを開始する。
     fn lock_piece(&mut self) {
         self.board.lock(&self.current);
-        let mut total_cleared = 0u32;
-        loop {
-            let cleared = self.board.clear_lines();
-            if cleared == 0 {
-                break;
-            }
-            total_cleared += cleared;
-            self.board.apply_gravity();
-        }
-        self.lines += total_cleared;
-        let cleared = total_cleared;
-        self.score += score_for(cleared) * self.level; // レベル倍率を掛ける
-        self.level = self.lines / 10 + 1; // 10ライン毎にレベルアップ
+        self.begin_clear();
+    }
 
-        // 次のピースを現在に昇格し、新たに next を決める
+    // 揃っている行を探し、あればアニメーション開始、なければ次ピースをスポーンする。
+    fn begin_clear(&mut self) {
+        let rows = self.board.full_rows();
+        if rows.is_empty() {
+            self.spawn_next();
+        } else {
+            self.clearing_rows = rows;
+            self.clear_anim_timer = 0.0;
+        }
+    }
+
+    // アニメーション終了後の処理: 行を消去して重力を適用し、連鎖を確認する。
+    fn finish_clear(&mut self) {
+        let count = self.clearing_rows.len() as u32;
+        self.board.clear_rows(&self.clearing_rows);
+        self.clearing_rows.clear();
+        self.board.apply_gravity();
+
+        self.lines += count;
+        self.score += score_for(count) * self.level; // レベル倍率を掛ける
+        self.level = self.lines / 10 + 1;            // 10ライン毎にレベルアップ
+
+        // 重力適用後に新たに揃った行があれば連鎖アニメーションへ、なければ次ピース
+        self.begin_clear();
+    }
+
+    // 次のピースをスポーンする。衝突していればゲームオーバー。
+    fn spawn_next(&mut self) {
         let kind = self.next_kind;
         self.next_kind = next_kind();
         self.current = Piece::new(kind);
@@ -404,6 +441,15 @@ impl Game {
     // 毎フレーム呼ばれる更新処理。dt は前フレームからの経過時間 (秒)。
     fn update(&mut self, dt: f32) {
         if self.game_over {
+            return;
+        }
+
+        // ── ライン消去アニメーション中はゲームを停止 ────────────────────
+        if !self.clearing_rows.is_empty() {
+            self.clear_anim_timer += dt;
+            if self.clear_anim_timer >= CLEAR_ANIM_DURATION {
+                self.finish_clear();
+            }
             return;
         }
 
@@ -476,6 +522,11 @@ impl Game {
             return;
         }
 
+        // アニメーション中は操作を受け付けない
+        if !self.clearing_rows.is_empty() {
+            return;
+        }
+
         if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::X) {
             self.try_rotate();
         }
@@ -485,9 +536,13 @@ impl Game {
     }
 
     fn draw(&self) {
-        self.board.draw();
-        draw_ghost(&self.board, &self.current);
-        draw_piece(&self.current);
+        self.board.draw(&self.clearing_rows, self.clear_anim_timer);
+
+        // アニメーション中はピース・ゴーストを描画しない (ピースはすでにボードに固定済み)
+        if self.clearing_rows.is_empty() {
+            draw_ghost(&self.board, &self.current);
+            draw_piece(&self.current);
+        }
 
         // ── NEXTピースのプレビュー ────────────────────────────────────
         let nx = BOARD_X + COLS as f32 * CELL + 30.0;
