@@ -446,9 +446,7 @@ impl Game {
     // スペースキーによるハードドロップ。ゴースト位置まで瞬時に落とし固定する。
     fn hard_drop(&mut self) {
         let gy = ghost_y(&self.board, &self.current);
-        let dropped = gy - self.current.y;
         self.current.y = gy;
-        self.score += dropped as u32 * 2;
         self.lock_piece();
     }
 
