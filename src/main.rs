@@ -375,11 +375,17 @@ impl Game {
     // 新ピースがスポーン直後から衝突していればゲームオーバーとする。
     fn lock_piece(&mut self) {
         self.board.lock(&self.current);
-        let cleared = self.board.clear_lines();
-        if cleared > 0 {
+        let mut total_cleared = 0u32;
+        loop {
+            let cleared = self.board.clear_lines();
+            if cleared == 0 {
+                break;
+            }
+            total_cleared += cleared;
             self.board.apply_gravity();
         }
-        self.lines += cleared;
+        self.lines += total_cleared;
+        let cleared = total_cleared;
         self.score += score_for(cleared) * self.level; // レベル倍率を掛ける
         self.level = self.lines / 10 + 1; // 10ライン毎にレベルアップ
 
