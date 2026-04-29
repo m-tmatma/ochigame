@@ -757,3 +757,176 @@ async fn main() {
         next_frame().await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const C: Color = Color::new(1.0, 1.0, 1.0, 1.0);
+
+    fn fill_row(board: &mut Board, row: usize) {
+        board.cells[row] = [Some(C); COLS];
+    }
+
+    // ── Board::full_rows ─────────────────────────────────────────────
+
+    #[test]
+    fn full_rows_empty() {
+        // 空ボードでは揃っている行が存在しない
+        assert!(Board::new().full_rows().is_empty());
+    }
+
+    #[test]
+    fn full_rows_one() {
+        // 最下行を埋めるとそのインデックスだけ返る
+        let mut b = Board::new();
+        fill_row(&mut b, 19);
+        assert_eq!(b.full_rows(), vec![19]);
+    }
+
+    #[test]
+    fn full_rows_multiple() {
+        // 複数行が揃っている場合はすべてのインデックスを返す
+        let mut b = Board::new();
+        fill_row(&mut b, 17);
+        fill_row(&mut b, 19);
+        assert_eq!(b.full_rows(), vec![17, 19]);
+    }
+
+    // ── Board::clear_rows ────────────────────────────────────────────
+
+    #[test]
+    fn clear_rows_empties_cells() {
+        // 指定行のすべてのセルが None になる
+        let mut b = Board::new();
+        fill_row(&mut b, 19);
+        b.clear_rows(&[19]);
+        assert!(b.cells[19].iter().all(|c| c.is_none()));
+    }
+
+    // ── Board::apply_gravity ─────────────────────────────────────────
+
+    #[test]
+    fn apply_gravity_single_block_falls_to_bottom() {
+        // 孤立ブロックはその列の底まで落ちる
+        let mut b = Board::new();
+        b.cells[5][3] = Some(C);
+        b.apply_gravity();
+        assert!(b.cells[19][3].is_some());
+        assert!(b.cells[5][3].is_none());
+    }
+
+    #[test]
+    fn apply_gravity_column_independent() {
+        // 重力は列ごとに独立して適用され、隣の列に影響しない
+        let mut b = Board::new();
+        b.cells[0][0] = Some(C); // col 0 の最上部
+        b.cells[19][1] = Some(C); // col 1 の最下部
+        b.apply_gravity();
+        assert!(b.cells[19][0].is_some()); // col 0 が底まで落ちる
+        assert!(b.cells[19][1].is_some()); // col 1 は変わらず
+        assert!(b.cells[0][0].is_none());
+    }
+
+    // ── Board::collides ──────────────────────────────────────────────
+
+    #[test]
+    fn collides_wall_left() {
+        // I ピース (row1 に [1,1,1,1]) を左壁にはみ出す位置に配置
+        let b = Board::new();
+        let p = Piece { shape: PIECES[0], color: C, x: -1, y: 0 };
+        assert!(b.collides(&p));
+    }
+
+    #[test]
+    fn collides_wall_right() {
+        // I ピース x=7 → col 10 がはみ出す (COLS=10)
+        let b = Board::new();
+        let p = Piece { shape: PIECES[0], color: C, x: 7, y: 0 };
+        assert!(b.collides(&p));
+    }
+
+    #[test]
+    fn collides_floor() {
+        // T ピース y=19 → row1 のブロックが行 20 (ROWS=20) へはみ出す
+        let b = Board::new();
+        let p = Piece { shape: PIECES[2], color: C, x: 3, y: 19 };
+        assert!(b.collides(&p));
+    }
+
+    #[test]
+    fn collides_existing_block() {
+        // T ピース x=4, y=9 の (5,9) に固定ブロックがあると衝突する
+        let mut b = Board::new();
+        b.cells[9][5] = Some(C);
+        let p = Piece { shape: PIECES[2], color: C, x: 4, y: 9 };
+        assert!(b.collides(&p));
+    }
+
+    #[test]
+    fn no_collision_in_bounds() {
+        // 空ボード中央付近では衝突しない
+        let b = Board::new();
+        let p = Piece { shape: PIECES[2], color: C, x: 3, y: 10 };
+        assert!(!b.collides(&p));
+    }
+
+    // ── Board::lock ──────────────────────────────────────────────────
+
+    #[test]
+    fn lock_sets_correct_cells() {
+        // O ピース x=0, y=18 → (1,18)(2,18)(1,19)(2,19) にブロックが置かれる
+        let mut b = Board::new();
+        let p = Piece { shape: PIECES[1], color: C, x: 0, y: 18 };
+        b.lock(&p);
+        assert!(b.cells[18][1].is_some());
+        assert!(b.cells[18][2].is_some());
+        assert!(b.cells[19][1].is_some());
+        assert!(b.cells[19][2].is_some());
+    }
+
+    #[test]
+    fn lock_ignores_above_board() {
+        // ボード上端 (cy < 0) にあるブロックは固定されない
+        let mut b = Board::new();
+        // I ピース x=3, y=-2 → row1 のブロックが cy=-1 → 無視される
+        let p = Piece { shape: PIECES[0], color: C, x: 3, y: -2 };
+        b.lock(&p);
+        assert!(b.cells[0].iter().all(|c| c.is_none()));
+    }
+
+    // ── ghost_y ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ghost_y_empty_board() {
+        // 空ボードでは I ピースがボード底 (row19) に達する位置まで落ちる
+        // I ピース row1 にブロック → gy+1=19 → gy=18
+        let b = Board::new();
+        let p = Piece { shape: PIECES[0], color: C, x: 3, y: 1 };
+        assert_eq!(ghost_y(&b, &p), 18);
+    }
+
+    #[test]
+    fn ghost_y_with_obstacle() {
+        // 障害物の直上でゴーストが止まる
+        // col3〜6 の row15 を埋める → I ピースは gy+1=14 で止まり gy=13
+        let mut b = Board::new();
+        for c in 3..7 {
+            b.cells[15][c] = Some(C);
+        }
+        let p = Piece { shape: PIECES[0], color: C, x: 3, y: 1 };
+        assert_eq!(ghost_y(&b, &p), 13);
+    }
+
+    // ── score_for ────────────────────────────────────────────────────
+
+    #[test]
+    fn score_for_values() {
+        // 同時消去数ごとのベーススコア (4ライン=テトリスは4倍超のボーナス)
+        assert_eq!(score_for(0), 0);
+        assert_eq!(score_for(1), 100);
+        assert_eq!(score_for(2), 300);
+        assert_eq!(score_for(3), 500);
+        assert_eq!(score_for(4), 800);
+    }
+}
