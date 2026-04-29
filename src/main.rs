@@ -749,7 +749,7 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let font = load_ttf_font_from_bytes(include_bytes!("../assets/NotoSansJP.ttf")).unwrap();
+    let font = load_ttf_font("C:/Windows/Fonts/meiryo.ttc").await.unwrap();
     let mut game = Game::new();
 
     loop {
