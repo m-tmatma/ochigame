@@ -179,6 +179,25 @@ impl Board {
         cleared
     }
 
+    // ライン消去後、各列ごとにブロックを独立して落下させる。
+    // 消去によって生じた空白ギャップを埋め、浮いたブロックを着地させる。
+    fn apply_gravity(&mut self) {
+        for c in 0..COLS {
+            // この列の上から順に、Someのセルだけ集める (相対順序を保持)
+            let filled: Vec<Color> = (0..ROWS)
+                .filter_map(|r| self.cells[r][c])
+                .collect();
+            let empty_rows = ROWS - filled.len();
+            for r in 0..ROWS {
+                self.cells[r][c] = if r < empty_rows {
+                    None
+                } else {
+                    Some(filled[r - empty_rows])
+                };
+            }
+        }
+    }
+
     fn draw(&self) {
         // ボードの外枠
         draw_rectangle_lines(
@@ -366,6 +385,9 @@ impl Game {
     fn lock_piece(&mut self) {
         self.board.lock(&self.current);
         let cleared = self.board.clear_lines();
+        if cleared > 0 {
+            self.board.apply_gravity();
+        }
         self.lines += cleared;
         self.score += score_for(cleared) * self.level; // レベル倍率を掛ける
         self.level = self.lines / 10 + 1; // 10ライン毎にレベルアップ
