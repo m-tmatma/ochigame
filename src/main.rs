@@ -664,7 +664,7 @@ impl Game {
         }
     }
 
-    fn draw(&self) {
+    fn draw(&self, font: &Font) {
         // 落下アニメーション中は目的地セルを隠す (FallingBlock が代わりに描画)
         let hidden: Vec<(usize, usize)> = self.falling_blocks
             .iter()
@@ -715,10 +715,13 @@ impl Game {
 
         // ── 操作説明 ──────────────────────────────────────────────────
         let lx = 10.0;
-        draw_text("← → : 移動", lx, BOARD_Y + 60.0, 18.0, GRAY);
-        draw_text("↑ / X: 回転", lx, BOARD_Y + 85.0, 18.0, GRAY);
-        draw_text("↓ : 落下", lx, BOARD_Y + 110.0, 18.0, GRAY);
-        draw_text("SPC: ハードドロップ", lx, BOARD_Y + 135.0, 18.0, GRAY);
+        let jp = |text, x, y, size, color| {
+            draw_text_ex(text, x, y, TextParams { font: Some(font), font_size: size, color, ..Default::default() });
+        };
+        jp("← → : 移動", lx, BOARD_Y + 60.0, 18, GRAY);
+        jp("↑ / X: 回転", lx, BOARD_Y + 85.0, 18, GRAY);
+        jp("↓ : 落下", lx, BOARD_Y + 110.0, 18, GRAY);
+        jp("SPC: ハードドロップ", lx, BOARD_Y + 135.0, 18, GRAY);
 
         // ── ゲームオーバー画面 ────────────────────────────────────────
         if self.game_over {
@@ -729,7 +732,7 @@ impl Game {
                 Color::new(0.0, 0.0, 0.0, 0.85),
             );
             draw_text("GAME OVER", gw * 0.28, gh * 0.5, 48.0, RED);
-            draw_text("R: リスタート", gw * 0.33, gh * 0.58, 28.0, WHITE);
+            draw_text_ex("R: リスタート", gw * 0.33, gh * 0.58, TextParams { font: Some(font), font_size: 28, color: WHITE, ..Default::default() });
         }
     }
 }
@@ -746,6 +749,7 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    let font = load_ttf_font_from_bytes(include_bytes!("../assets/NotoSansJP.ttf")).unwrap();
     let mut game = Game::new();
 
     loop {
@@ -754,7 +758,7 @@ async fn main() {
 
         game.handle_keys();
         game.update(dt);
-        game.draw();
+        game.draw(&font);
 
         next_frame().await;
     }
