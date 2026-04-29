@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use macroquad::prelude::*;
 
 // ボードのサイズ (標準テトリス: 横10, 縦20)
