@@ -8,7 +8,7 @@ const CELL: f32 = 32.0;
 // ボード左上の描画位置
 const BOARD_X: f32 = 200.0;
 const BOARD_Y: f32 = 40.0;
-// ライン消去フラッシュアニメーションの時間 (秒)
+// ライン消去アニメーションの時間 (秒) — この間はゲームを停止しパーティクルを表示する
 const CLEAR_ANIM_DURATION: f32 = 0.45;
 
 // テトロミノ7種の形状。各ピースは4x4のビットマップで表現し、
@@ -87,6 +87,40 @@ fn rotate(piece: &[[u8; 4]; 4]) -> [[u8; 4]; 4] {
         }
     }
     rotated
+}
+
+// 爆発パーティクル1個。セルの色を持ち、重力・空気抵抗で飛散する。
+struct Particle {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    color: Color,
+    size: f32,
+    age: f32,
+    lifetime: f32,
+}
+
+impl Particle {
+    fn update(&mut self, dt: f32) {
+        self.x += self.vx * dt;
+        self.y += self.vy * dt;
+        self.vy += 600.0 * dt; // 重力
+        self.vx *= 1.0 - dt * 2.5; // 横方向の空気抵抗
+        self.age += dt;
+    }
+
+    fn is_dead(&self) -> bool {
+        self.age >= self.lifetime
+    }
+
+    fn draw(&self) {
+        let t = (self.age / self.lifetime).min(1.0);
+        let alpha = 1.0 - t;
+        let size = self.size * (1.0 - t * 0.6); // 飛ぶにつれて小さくなる
+        let color = Color::new(self.color.r, self.color.g, self.color.b, alpha);
+        draw_rectangle(self.x - size * 0.5, self.y - size * 0.5, size, size, color);
+    }
 }
 
 // 操作中のテトロミノ1個を表す。
@@ -192,7 +226,7 @@ impl Board {
         }
     }
 
-    // ボードを描画する。clearing_rows に含まれる行はフラッシュアニメーションで表示する。
+    // ボードを描画する。clearing_rows に含まれる行は爆発直後の白フラッシュで表示する。
     fn draw(&self, clearing_rows: &[usize], clear_timer: f32) {
         // ボードの外枠
         draw_rectangle_lines(
@@ -210,17 +244,13 @@ impl Board {
                 let y = BOARD_Y + r as f32 * CELL;
 
                 if clearing_rows.contains(&r) {
-                    // sin波で3回白くフラッシュ: t=0→1 の間に3往復
+                    // 爆発直後: 白くフラッシュして素早く消える (t=0.3 で完全透明)
                     let t = clear_timer / CLEAR_ANIM_DURATION;
-                    let wave = ((t * std::f32::consts::PI * 6.0).sin() * 0.5 + 0.5) as f32;
-                    let col = self.cells[r][c].unwrap_or(WHITE);
-                    let flash_color = Color::new(
-                        col.r + (1.0 - col.r) * wave,
-                        col.g + (1.0 - col.g) * wave,
-                        col.b + (1.0 - col.b) * wave,
-                        1.0,
-                    );
-                    draw_rectangle(x, y, CELL - 1.0, CELL - 1.0, flash_color);
+                    let alpha = (1.0 - t * 3.5).max(0.0);
+                    if alpha > 0.0 {
+                        draw_rectangle(x, y, CELL - 1.0, CELL - 1.0,
+                            Color::new(1.0, 1.0, 1.0, alpha));
+                    }
                 } else if let Some(color) = self.cells[r][c] {
                     // 固定済みブロック
                     draw_rectangle(x, y, CELL - 1.0, CELL - 1.0, color);
@@ -322,6 +352,8 @@ struct Game {
     // ライン消去アニメーション
     clearing_rows: Vec<usize>, // アニメーション中の行インデックス (空なら通常状態)
     clear_anim_timer: f32,     // アニメーション経過時間 (秒)
+    // 爆発パーティクル
+    particles: Vec<Particle>,
 }
 
 impl Game {
@@ -343,6 +375,7 @@ impl Game {
             last_dir: 0,
             clearing_rows: Vec::new(),
             clear_anim_timer: 0.0,
+            particles: Vec::new(),
         }
     }
 
@@ -399,14 +432,56 @@ impl Game {
         self.begin_clear();
     }
 
-    // 揃っている行を探し、あればアニメーション開始、なければ次ピースをスポーンする。
+    // 揃っている行を探し、あれば爆発パーティクルを生成してアニメーション開始。
     fn begin_clear(&mut self) {
         let rows = self.board.full_rows();
         if rows.is_empty() {
             self.spawn_next();
         } else {
+            self.spawn_explosion_particles(&rows);
             self.clearing_rows = rows;
             self.clear_anim_timer = 0.0;
+        }
+    }
+
+    // clearing_rows の各セルから爆発パーティクルを生成する。
+    fn spawn_explosion_particles(&mut self, rows: &[usize]) {
+        for &r in rows {
+            for c in 0..COLS {
+                if let Some(cell_color) = self.board.cells[r][c] {
+                    let cx = BOARD_X + c as f32 * CELL + CELL * 0.5;
+                    let cy = BOARD_Y + r as f32 * CELL + CELL * 0.5;
+
+                    // セルごとに8個のパーティクルを生成
+                    for i in 0..8 {
+                        // 均等な角度 + ランダムなばらつきで全方向に飛び散る
+                        let base_angle = (i as f32 / 8.0) * std::f32::consts::PI * 2.0;
+                        let angle = base_angle + rand::gen_range(-0.4f32, 0.4);
+                        let speed = rand::gen_range(120.0f32, 480.0);
+                        let vx = angle.cos() * speed;
+                        // 上方向バイアス: 爆発は上に飛びやすい
+                        let vy = angle.sin() * speed - rand::gen_range(0.0f32, 80.0);
+
+                        // 1/4 の確率で白い火花を混ぜる
+                        let color = if rand::gen_range(0u32, 4) == 0 {
+                            Color::new(1.0, 0.95, 0.7, 1.0) // 黄白の火花
+                        } else {
+                            cell_color
+                        };
+
+                        self.particles.push(Particle {
+                            x: cx + rand::gen_range(-6.0f32, 6.0),
+                            y: cy + rand::gen_range(-6.0f32, 6.0),
+                            vx,
+                            vy,
+                            color,
+                            size: rand::gen_range(4.0f32, 11.0),
+                            age: 0.0,
+                            lifetime: rand::gen_range(0.4f32, 0.85),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -443,6 +518,12 @@ impl Game {
         if self.game_over {
             return;
         }
+
+        // パーティクルはゲーム状態に関係なく常に更新する
+        for p in &mut self.particles {
+            p.update(dt);
+        }
+        self.particles.retain(|p| !p.is_dead());
 
         // ── ライン消去アニメーション中はゲームを停止 ────────────────────
         if !self.clearing_rows.is_empty() {
@@ -542,6 +623,11 @@ impl Game {
         if self.clearing_rows.is_empty() {
             draw_ghost(&self.board, &self.current);
             draw_piece(&self.current);
+        }
+
+        // パーティクルを描画 (ボードより手前に表示)
+        for p in &self.particles {
+            p.draw();
         }
 
         // ── NEXTピースのプレビュー ────────────────────────────────────
