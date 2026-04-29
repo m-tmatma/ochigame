@@ -740,7 +740,7 @@ impl Game {
 fn window_conf() -> Conf {
     Conf {
         window_title: "Tetris".to_string(),
-        window_width: 620,
+        window_width: 700,
         window_height: 720,
         window_resizable: false,
         ..Default::default()
