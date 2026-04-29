@@ -8,8 +8,10 @@ const CELL: f32 = 32.0;
 // ボード左上の描画位置
 const BOARD_X: f32 = 200.0;
 const BOARD_Y: f32 = 40.0;
-// ライン消去アニメーションの時間 (秒) — この間はゲームを停止しパーティクルを表示する
+// ライン消去爆発アニメーションの時間 (秒)
 const CLEAR_ANIM_DURATION: f32 = 0.45;
+// 重力アニメーションの落下速度 (行/秒) — 小さいほどゆっくり
+const FALL_SPEED: f32 = 5.0;
 
 // テトロミノ7種の形状。各ピースは4x4のビットマップで表現し、
 // 1 がブロックのあるマス、0 が空マス。
@@ -123,6 +125,28 @@ impl Particle {
     }
 }
 
+// ライン消去後にゆっくり落下するブロック1個。
+// board に既に最終位置が書き込まれているが、visual_y がそこに到達するまで
+// 目的地セルを隠してこちらを描画することで落下アニメーションを表現する。
+struct FallingBlock {
+    col: usize,
+    color: Color,
+    visual_y: f32,   // 現在の描画行 (小数、落下中に増加)
+    target_row: usize, // 到達先の行
+}
+
+impl FallingBlock {
+    fn is_done(&self) -> bool {
+        self.visual_y >= self.target_row as f32
+    }
+
+    fn draw(&self) {
+        let x = BOARD_X + self.col as f32 * CELL;
+        let y = BOARD_Y + self.visual_y * CELL;
+        draw_rectangle(x, y, CELL - 1.0, CELL - 1.0, self.color);
+    }
+}
+
 // 操作中のテトロミノ1個を表す。
 // x, y はボード座標系 (左上が原点、下がY正方向)。
 struct Piece {
@@ -207,11 +231,10 @@ impl Board {
         }
     }
 
-    // ライン消去後、各列ごとにブロックを独立して落下させる。
+    // 各列ごとにブロックを独立して落下させる。
     // 消去によって生じた空白ギャップを埋め、浮いたブロックを着地させる。
     fn apply_gravity(&mut self) {
         for c in 0..COLS {
-            // この列の上から順に、Someのセルだけ集める (相対順序を保持)
             let filled: Vec<Color> = (0..ROWS)
                 .filter_map(|r| self.cells[r][c])
                 .collect();
@@ -226,8 +249,9 @@ impl Board {
         }
     }
 
-    // ボードを描画する。clearing_rows に含まれる行は爆発直後の白フラッシュで表示する。
-    fn draw(&self, clearing_rows: &[usize], clear_timer: f32) {
+    // ボードを描画する。
+    // clearing_rows の行は白フラッシュ、hidden_cells のセルは FallingBlock が代わりに描画するため省略する。
+    fn draw(&self, clearing_rows: &[usize], clear_timer: f32, hidden_cells: &[(usize, usize)]) {
         // ボードの外枠
         draw_rectangle_lines(
             BOARD_X - 2.0,
@@ -244,22 +268,22 @@ impl Board {
                 let y = BOARD_Y + r as f32 * CELL;
 
                 if clearing_rows.contains(&r) {
-                    // 爆発直後: 白くフラッシュして素早く消える (t=0.3 で完全透明)
+                    // 爆発直後の白フラッシュ: t=0.3 付近で完全透明になる
                     let t = clear_timer / CLEAR_ANIM_DURATION;
                     let alpha = (1.0 - t * 3.5).max(0.0);
                     if alpha > 0.0 {
                         draw_rectangle(x, y, CELL - 1.0, CELL - 1.0,
                             Color::new(1.0, 1.0, 1.0, alpha));
                     }
+                } else if hidden_cells.contains(&(c, r)) {
+                    // FallingBlock がアニメーション中のセルは描画しない
+                    draw_rectangle_lines(x, y, CELL - 1.0, CELL - 1.0, 0.5,
+                        Color::new(0.2, 0.2, 0.2, 1.0));
                 } else if let Some(color) = self.cells[r][c] {
-                    // 固定済みブロック
                     draw_rectangle(x, y, CELL - 1.0, CELL - 1.0, color);
                 } else {
-                    // 空セル: 薄いグリッド線だけ描画
-                    draw_rectangle_lines(
-                        x, y, CELL - 1.0, CELL - 1.0, 0.5,
-                        Color::new(0.2, 0.2, 0.2, 1.0),
-                    );
+                    draw_rectangle_lines(x, y, CELL - 1.0, CELL - 1.0, 0.5,
+                        Color::new(0.2, 0.2, 0.2, 1.0));
                 }
             }
         }
@@ -346,14 +370,16 @@ struct Game {
     lock_timer: f32, // 着地後の固定までの待機時間 (秒)
     game_over: bool,
     // DAS (Delayed Auto Shift): キー長押しによる連続横移動の制御
-    das_timer: f32,   // 現在の方向キー押下継続時間
-    das_active: bool, // 初回ディレイを超えてARR段階に入っているか
-    last_dir: i32,    // 前フレームの方向 (-1/0/1)
-    // ライン消去アニメーション
-    clearing_rows: Vec<usize>, // アニメーション中の行インデックス (空なら通常状態)
-    clear_anim_timer: f32,     // アニメーション経過時間 (秒)
+    das_timer: f32,
+    das_active: bool,
+    last_dir: i32,
+    // ライン消去爆発アニメーション
+    clearing_rows: Vec<usize>,
+    clear_anim_timer: f32,
     // 爆発パーティクル
     particles: Vec<Particle>,
+    // 重力落下アニメーション
+    falling_blocks: Vec<FallingBlock>,
 }
 
 impl Game {
@@ -376,6 +402,7 @@ impl Game {
             clearing_rows: Vec::new(),
             clear_anim_timer: 0.0,
             particles: Vec::new(),
+            falling_blocks: Vec::new(),
         }
     }
 
@@ -404,20 +431,17 @@ impl Game {
         let rotated = rotate(&self.current.shape);
         let old_shape = self.current.shape;
         self.current.shape = rotated;
-        // SRS 簡易版: X軸方向に 0, -1, +1, -2, +2 のオフセットを試みる
         for kick in [0, -1, 1, -2, 2] {
             self.current.x += kick;
             if !self.board.collides(&self.current) {
-                return; // この位置で回転成功
+                return;
             }
             self.current.x -= kick;
         }
-        // すべてのキックが失敗 → 回転前の形状に戻す
         self.current.shape = old_shape;
     }
 
     // スペースキーによるハードドロップ。ゴースト位置まで瞬時に落とし固定する。
-    // 落下マス数 × 2 点をスコアに加算する。
     fn hard_drop(&mut self) {
         let gy = ghost_y(&self.board, &self.current);
         let dropped = gy - self.current.y;
@@ -426,7 +450,7 @@ impl Game {
         self.lock_piece();
     }
 
-    // ピースをボードに固定し、ライン消去アニメーションを開始する。
+    // ピースをボードに固定し、爆発アニメーションを開始する。
     fn lock_piece(&mut self) {
         self.board.lock(&self.current);
         self.begin_clear();
@@ -451,24 +475,17 @@ impl Game {
                 if let Some(cell_color) = self.board.cells[r][c] {
                     let cx = BOARD_X + c as f32 * CELL + CELL * 0.5;
                     let cy = BOARD_Y + r as f32 * CELL + CELL * 0.5;
-
-                    // セルごとに8個のパーティクルを生成
                     for i in 0..8 {
-                        // 均等な角度 + ランダムなばらつきで全方向に飛び散る
                         let base_angle = (i as f32 / 8.0) * std::f32::consts::PI * 2.0;
                         let angle = base_angle + rand::gen_range(-0.4f32, 0.4);
                         let speed = rand::gen_range(120.0f32, 480.0);
                         let vx = angle.cos() * speed;
-                        // 上方向バイアス: 爆発は上に飛びやすい
                         let vy = angle.sin() * speed - rand::gen_range(0.0f32, 80.0);
-
-                        // 1/4 の確率で白い火花を混ぜる
                         let color = if rand::gen_range(0u32, 4) == 0 {
-                            Color::new(1.0, 0.95, 0.7, 1.0) // 黄白の火花
+                            Color::new(1.0, 0.95, 0.7, 1.0)
                         } else {
                             cell_color
                         };
-
                         self.particles.push(Particle {
                             x: cx + rand::gen_range(-6.0f32, 6.0),
                             y: cy + rand::gen_range(-6.0f32, 6.0),
@@ -485,18 +502,50 @@ impl Game {
         }
     }
 
-    // アニメーション終了後の処理: 行を消去して重力を適用し、連鎖を確認する。
+    // 爆発アニメーション終了: 行を消去し、落下アニメーションを開始する。
     fn finish_clear(&mut self) {
         let count = self.clearing_rows.len() as u32;
         self.board.clear_rows(&self.clearing_rows);
         self.clearing_rows.clear();
+
+        // 重力適用前後の差分から FallingBlock を生成する
+        let before = self.board.cells; // コピー
         self.board.apply_gravity();
 
-        self.lines += count;
-        self.score += score_for(count) * self.level; // レベル倍率を掛ける
-        self.level = self.lines / 10 + 1;            // 10ライン毎にレベルアップ
+        self.falling_blocks.clear();
+        for c in 0..COLS {
+            // 消去前のこの列のブロック (上から順)
+            let cells_before: Vec<(usize, Color)> = (0..ROWS)
+                .filter_map(|r| before[r][c].map(|color| (r, color)))
+                .collect();
+            let n = cells_before.len();
+            let target_start = ROWS - n; // 重力後の先頭行
+            for (i, (from_row, color)) in cells_before.iter().enumerate() {
+                let to_row = target_start + i;
+                if *from_row != to_row {
+                    self.falling_blocks.push(FallingBlock {
+                        col: c,
+                        color: *color,
+                        visual_y: *from_row as f32,
+                        target_row: to_row,
+                    });
+                }
+            }
+        }
 
-        // 重力適用後に新たに揃った行があれば連鎖アニメーションへ、なければ次ピース
+        self.lines += count;
+        self.score += score_for(count) * self.level;
+        self.level = self.lines / 10 + 1;
+
+        // 落下するブロックがなければ即座に連鎖チェックへ
+        if self.falling_blocks.is_empty() {
+            self.begin_clear();
+        }
+    }
+
+    // 落下アニメーション終了: 連鎖チェックまたは次ピースへ。
+    fn finish_fall(&mut self) {
+        self.falling_blocks.clear();
         self.begin_clear();
     }
 
@@ -507,7 +556,6 @@ impl Game {
         self.current = Piece::new(kind);
         self.fall_timer = 0.0;
         self.lock_timer = 0.0;
-
         if self.board.collides(&self.current) {
             self.game_over = true;
         }
@@ -525,7 +573,7 @@ impl Game {
         }
         self.particles.retain(|p| !p.is_dead());
 
-        // ── ライン消去アニメーション中はゲームを停止 ────────────────────
+        // ── 状態: 爆発アニメーション ─────────────────────────────────
         if !self.clearing_rows.is_empty() {
             self.clear_anim_timer += dt;
             if self.clear_anim_timer >= CLEAR_ANIM_DURATION {
@@ -534,8 +582,19 @@ impl Game {
             return;
         }
 
+        // ── 状態: 落下アニメーション ─────────────────────────────────
+        if !self.falling_blocks.is_empty() {
+            for fb in &mut self.falling_blocks {
+                fb.visual_y = (fb.visual_y + FALL_SPEED * dt)
+                    .min(fb.target_row as f32);
+            }
+            if self.falling_blocks.iter().all(|fb| fb.is_done()) {
+                self.finish_fall();
+            }
+            return;
+        }
+
         // ── 横移動 (DAS: Delayed Auto Shift) ──────────────────────────
-        // 最初の押下で即時移動し、0.15秒後から 0.05秒間隔で連続移動する。
         let dir = if is_key_down(KeyCode::Left) {
             -1
         } else if is_key_down(KeyCode::Right) {
@@ -546,15 +605,12 @@ impl Game {
 
         if dir != 0 {
             if dir != self.last_dir {
-                // 新たな方向キーが押された → 即時1回移動、DASタイマーをリセット
                 self.try_move(dir, 0);
                 self.das_timer = 0.0;
                 self.das_active = false;
                 self.last_dir = dir;
             } else {
                 self.das_timer += dt;
-                // das_active = false の間は初回ディレイ (150ms)、
-                // true になってからは ARR (Auto Repeat Rate, 50ms) で連続移動
                 let threshold = if self.das_active { 0.05 } else { 0.15 };
                 if self.das_timer >= threshold {
                     self.try_move(dir, 0);
@@ -563,38 +619,28 @@ impl Game {
                 }
             }
         } else {
-            // キーを離したらすべてリセット
             self.last_dir = 0;
             self.das_active = false;
             self.das_timer = 0.0;
         }
 
         // ── 自動落下 ──────────────────────────────────────────────────
-        // ソフトドロップ中 (↓押下) は落下間隔を 50ms に固定して加速する。
-        let interval = if is_key_down(KeyCode::Down) {
-            0.05f32
-        } else {
-            self.fall_interval()
-        };
+        let interval = if is_key_down(KeyCode::Down) { 0.05f32 } else { self.fall_interval() };
 
         self.fall_timer += dt;
         if self.fall_timer >= interval {
             self.fall_timer = 0.0;
             if !self.try_move(0, 1) {
-                // 着地: ロックディレイタイマーを進める (0.5秒で固定)
                 self.lock_timer += interval;
                 if self.lock_timer >= 0.5 {
                     self.lock_piece();
                 }
             } else {
-                // 落下できた → ロックタイマーをリセット
                 self.lock_timer = 0.0;
             }
         }
     }
 
-    // is_key_pressed (エッジ検出) を使う操作はここで処理する。
-    // update とは分離することで、同フレーム内で重複処理しない。
     fn handle_keys(&mut self) {
         if self.game_over {
             if is_key_pressed(KeyCode::R) {
@@ -604,7 +650,7 @@ impl Game {
         }
 
         // アニメーション中は操作を受け付けない
-        if !self.clearing_rows.is_empty() {
+        if !self.clearing_rows.is_empty() || !self.falling_blocks.is_empty() {
             return;
         }
 
@@ -617,15 +663,25 @@ impl Game {
     }
 
     fn draw(&self) {
-        self.board.draw(&self.clearing_rows, self.clear_anim_timer);
+        // 落下アニメーション中は目的地セルを隠す (FallingBlock が代わりに描画)
+        let hidden: Vec<(usize, usize)> = self.falling_blocks
+            .iter()
+            .map(|fb| (fb.col, fb.target_row))
+            .collect();
+        self.board.draw(&self.clearing_rows, self.clear_anim_timer, &hidden);
 
-        // アニメーション中はピース・ゴーストを描画しない (ピースはすでにボードに固定済み)
-        if self.clearing_rows.is_empty() {
+        // アニメーション中はピース・ゴーストを描画しない
+        if self.clearing_rows.is_empty() && self.falling_blocks.is_empty() {
             draw_ghost(&self.board, &self.current);
             draw_piece(&self.current);
         }
 
-        // パーティクルを描画 (ボードより手前に表示)
+        // 落下中のブロックを描画
+        for fb in &self.falling_blocks {
+            fb.draw();
+        }
+
+        // パーティクルを描画
         for p in &self.particles {
             p.draw();
         }
@@ -640,8 +696,7 @@ impl Game {
                     draw_rectangle(
                         nx + c as f32 * 28.0,
                         BOARD_Y + 40.0 + r as f32 * 28.0,
-                        27.0,
-                        27.0,
+                        27.0, 27.0,
                         next_piece.color,
                     );
                 }
@@ -667,7 +722,6 @@ impl Game {
         if self.game_over {
             let gw = screen_width();
             let gh = screen_height();
-            // 半透明の黒オーバーレイ
             draw_rectangle(
                 gw * 0.2, gh * 0.35, gw * 0.6, gh * 0.3,
                 Color::new(0.0, 0.0, 0.0, 0.85),
@@ -692,13 +746,12 @@ fn window_conf() -> Conf {
 async fn main() {
     let mut game = Game::new();
 
-    // macroquad のメインループ: 毎フレーム next_frame().await でVSyncを待つ。
     loop {
-        let dt = get_frame_time(); // 前フレームからの経過時間 (秒)
+        let dt = get_frame_time();
         clear_background(Color::new(0.05, 0.05, 0.1, 1.0));
 
-        game.handle_keys(); // エッジ入力 (押した瞬間) を処理
-        game.update(dt);    // 連続入力・タイマーを処理
+        game.handle_keys();
+        game.update(dt);
         game.draw();
 
         next_frame().await;
