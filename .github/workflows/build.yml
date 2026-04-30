@@ -13,13 +13,13 @@ jobs:
         with:
           expand-composite-actions: true
           expand-composite-actions-threshold: 10  # 10秒以上のcomposite actionsのみ展開。デフォルトは20秒
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -30,7 +30,7 @@ jobs:
         run: cargo build --release
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tetris-windows
           path: target/release/tetris.exe
