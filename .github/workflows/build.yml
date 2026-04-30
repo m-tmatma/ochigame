@@ -2,7 +2,6 @@ name: Build
 
 on:
   push:
-    branches: ["*"]
   pull_request:
     branches: [master]
 
@@ -10,6 +9,10 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
+      - uses: Kesin11/actions-timeline@v3.1.0
+        with:
+          expand-composite-actions: true
+          expand-composite-actions-threshold: 10  # 10秒以上のcomposite actionsのみ展開。デフォルトは20秒
       - uses: actions/checkout@v4
 
       - name: Install Rust
@@ -23,7 +26,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Build
         run: cargo build --release
 
